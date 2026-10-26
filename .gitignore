@@ -1,0 +1,3 @@
+node_modules/
+technews.db*
+.DS_Store
