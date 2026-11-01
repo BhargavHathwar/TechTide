@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+technews.db*
+.git
+.gitignore
+.DS_Store
+k8s
+README.md
+.dockerignore
+

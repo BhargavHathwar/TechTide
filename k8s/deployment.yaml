@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: techtide-app
+  namespace: techtide
+  labels:
+    app.kubernetes.io/name: techtide
+spec:
+  # NOTE: Keep replicas at 1 while using SQLite to prevent multi-writer database corruption.
+  replicas: 1
+  strategy:
+    # Use Recreate so Azure Disk attaches cleanly without volume multi-attach conflicts
+    type: Recreate
+  selector:
+    matchLabels:
+      app: techtide
+  template:
+    metadata:
+      labels:
+        app: techtide
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: techtide
+          image: techtideacr6ac9a35f.azurecr.io/techtide:2.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: techtide-config
+            - secretRef:
+                name: techtide-secret
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: techtide-storage
+              mountPath: /data
+      volumes:
+        - name: techtide-storage
+          persistentVolumeClaim:
+            claimName: techtide-data-pvc
+

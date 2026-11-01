@@ -36,10 +36,15 @@ const timeAgo = (timestamp) => {
 
 // API Fetch Client
 async function api(path, opts = {}) {
-  const response = await fetch('/api' + path, {
-    headers: { 'Content-Type': 'application/json' },
+  const { headers, ...restOpts } = opts;
+  const normalizedPath = path.startsWith('/api/') ? path : ('/api' + (path.startsWith('/') ? path : '/' + path));
+  const response = await fetch(normalizedPath, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(headers || {})
+    },
     credentials: 'same-origin',
-    ...opts,
+    ...restOpts,
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
   const data = await response.json().catch(() => ({}));
@@ -609,10 +614,11 @@ function switchToLandingView() {
 }
 
 async function loadAppTopics() {
+  const container = $('#appTopics');
+  if (!container) return;
+
   try {
     const cats = await api('/categories');
-    const container = $('#appTopics');
-    if (!container) return;
 
     const renderItem = (label, val, count, isSaved = false) => {
       const active = isSaved ? state.saved : (!state.saved && state.category === val);
@@ -632,6 +638,16 @@ async function loadAppTopics() {
       renderItem('★ Bookmarks', '', null, true);
   } catch (err) {
     console.error('Failed to load topics:', err);
+    if (err.status === 401) {
+      showToast('Session expired. Please log in again.');
+      switchToLandingView();
+      return;
+    }
+    container.innerHTML = `
+      <div style="padding: 1rem 0.5rem; color: var(--text-muted); font-size: 0.85rem;">
+        Failed to load categories.
+      </div>
+    `;
   }
 }
 
@@ -743,6 +759,31 @@ async function loadAppFeed(append = false) {
     loadMoreBtn.classList.toggle('hidden', stories.length < 30);
   } catch (err) {
     console.error('Failed to load news:', err);
+    if (err.status === 401) {
+      showToast('Session expired. Please log in again.');
+      switchToLandingView();
+      return;
+    }
+    if (!append) {
+      container.innerHTML = `
+        <div class="feed-empty">
+          <div class="feed-empty-icon" style="color: #f43f5e;">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+          </div>
+          <h3>Failed to load stories</h3>
+          <p>${esc(err.message || 'An error occurred while fetching news stories.')}</p>
+          <button class="btn btn-ghost btn-sm" id="feedRetryBtn" style="margin-top: 1rem;">Retry</button>
+        </div>
+      `;
+      const retryBtn = $('#feedRetryBtn');
+      if (retryBtn) {
+        retryBtn.onclick = () => loadAppFeed();
+      }
+    }
   }
 }
 

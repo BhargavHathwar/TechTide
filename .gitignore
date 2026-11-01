@@ -1,3 +1,4 @@
 node_modules/
 technews.db*
 .DS_Store
+k8s/secret.yaml

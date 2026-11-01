@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: techtide-config
+  namespace: techtide
+  labels:
+    app.kubernetes.io/name: techtide
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  FETCH_CRON: "*/10 * * * *"
+  DB_PATH: "/data/technews.db"
+  # Set to "false" while accessing directly over HTTP IP.
+  # Set to "true" once a custom domain with HTTPS / TLS Ingress is configured.
+  COOKIE_SECURE: "false"
+

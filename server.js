@@ -7,13 +7,25 @@ const Database = require('better-sqlite3');
 const Parser = require('rss-parser');
 const cron = require('node-cron');
 const path = require('path');
+const fs = require('fs');
 const feeds = require('./feeds');
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-me';
-const FETCH_CRON = process.env.FETCH_CRON || '*/10 * * * *';
 
-const db = new Database(path.join(__dirname, 'technews.db'));
+if (
+  process.env.NODE_ENV === 'production' &&
+  JWT_SECRET === 'dev-only-secret-change-me'
+) {
+  throw new Error('JWT_SECRET must be configured in production');
+}
+const FETCH_CRON = process.env.FETCH_CRON || '*/10 * * * *';
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'technews.db');
+
+// Ensure database directory exists (useful for container volume mounts)
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -76,23 +88,57 @@ fetchAll();
 
 /* ---------- App + auth ---------- */
 const app = express();
+app.set('trust proxy', 1); // Trust reverse proxies (Ingress / Azure Load Balancer) for secure cookies
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Kubernetes / Cloud Health Probe
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString() });
+});
+
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
-const setCookie = (res, user) => res.cookie('token',
-  jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' }),
-  { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 30 * 864e5 });
+
+function getCookieOptions(req) {
+  let isSecure = false;
+  if (process.env.COOKIE_SECURE !== undefined) {
+    // Explicit environment override (e.g. COOKIE_SECURE="false" for HTTP IP or "true" for HTTPS)
+    isSecure = process.env.COOKIE_SECURE === 'true';
+  } else if (process.env.NODE_ENV === 'production') {
+    // In production, secure cookie if request is on HTTPS or behind an HTTPS proxy
+    isSecure = Boolean(req && (req.secure || req.headers['x-forwarded-proto'] === 'https'));
+  }
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: isSecure,
+    maxAge: 30 * 864e5,
+    path: '/'
+  };
+}
+
+const setCookie = (req, res, user) => {
+  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
+  res.cookie('token', token, getCookieOptions(req));
+};
+
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
 
 function requireAuth(req, res, next) {
   try {
-    const { id } = jwt.verify(req.cookies.token, JWT_SECRET);
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const rawToken = req.cookies.token || bearerToken;
+    if (!rawToken) throw 0;
+    const { id } = jwt.verify(rawToken, JWT_SECRET);
     const user = db.prepare('SELECT * FROM users WHERE id=?').get(id);
     if (!user) throw 0;
-    req.user = user; next();
-  } catch { res.status(401).json({ error: 'Please log in.' }); }
+    req.user = user;
+    next();
+  } catch {
+    res.status(401).json({ error: 'Please log in.' });
+  }
 }
 
 app.post('/api/register', authLimiter, (req, res) => {
@@ -106,7 +152,8 @@ app.post('/api/register', authLimiter, (req, res) => {
   const info = db.prepare('INSERT INTO users (name,email,password_hash,created_at) VALUES (?,?,?,?)')
     .run(name.trim(), e, bcrypt.hashSync(password, 12), Date.now());
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid);
-  setCookie(res, user); res.json(publicUser(user));
+  setCookie(req, res, user);
+  res.json(publicUser(user));
 });
 
 app.post('/api/login', authLimiter, (req, res) => {
@@ -114,10 +161,16 @@ app.post('/api/login', authLimiter, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE email=?').get(email.trim().toLowerCase());
   if (!user || !bcrypt.compareSync(password, user.password_hash))
     return res.status(401).json({ error: 'Email or password is incorrect.' });
-  setCookie(res, user); res.json(publicUser(user));
+  setCookie(req, res, user);
+  res.json(publicUser(user));
 });
 
-app.post('/api/logout', (req, res) => { res.clearCookie('token'); res.json({ ok: true }); });
+app.post('/api/logout', (req, res) => {
+  const opts = getCookieOptions(req);
+  delete opts.maxAge;
+  res.clearCookie('token', opts);
+  res.json({ ok: true });
+});
 app.get('/api/me', requireAuth, (req, res) => res.json(publicUser(req.user)));
 
 /* ---------- Public Landing Page API ---------- */
@@ -182,4 +235,21 @@ function startServer(p) {
     }
   });
 }
-startServer(PORT);
+if (require.main === module) {
+  startServer(PORT);
+}
+
+module.exports = { app, db, startServer };
+
+// Graceful shutdown handling for Kubernetes Pod lifecycle
+function gracefulShutdown(signal) {
+  console.log(`[server] ${signal} signal received: closing SQLite connection and stopping server`);
+  try {
+    db.close();
+  } catch (err) {
+    console.error('[server] Error closing database:', err.message);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
